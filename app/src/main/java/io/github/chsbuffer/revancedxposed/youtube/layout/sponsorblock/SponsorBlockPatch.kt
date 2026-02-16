@@ -34,7 +34,7 @@ import org.luckypray.dexkit.wrap.DexMethod
 
 val SponsorBlock = patch(
     name = "SponsorBlock",
-    description = "Adds options to enable and configure SponsorBlock, which can skip undesired video segments such as sponsored content.",
+    description = "Adds options to enable and configure SponsorBlock, which can skip undesired video segments such as sponsored content."
 ) {
     dependsOn(
         VideoInformationPatch,
@@ -43,20 +43,23 @@ val SponsorBlock = patch(
         PlayerControls,
     )
 
+    // -----------------------------
+    // Settings screen integration
+    // -----------------------------
     PreferenceScreen.SPONSORBLOCK.addPreferences(
-        // SB setting is old code with lots of custom preferences and updating behavior.
-        // Added as a preference group and not a fragment so the preferences are searchable.
         PreferenceCategory(
             key = "revanced_settings_screen_10_sponsorblock",
             sorting = PreferenceScreenPreference.Sorting.UNSORTED,
-            preferences = emptySet(), // Preferences are added by custom class at runtime.
+            preferences = emptySet(),
             tag = SponsorBlockPreferenceGroup::class.java
-        ), PreferenceCategory(
+        ),
+        PreferenceCategory(
             key = "revanced_sb_stats",
             sorting = PreferenceScreenPreference.Sorting.UNSORTED,
-            preferences = emptySet(), // Preferences are added by custom class at runtime.
+            preferences = emptySet(),
             tag = SponsorBlockStatsPreferenceCategory::class.java
-        ), PreferenceCategory(
+        ),
+        PreferenceCategory(
             key = "revanced_sb_about",
             sorting = PreferenceScreenPreference.Sorting.UNSORTED,
             preferences = setOf(
@@ -69,50 +72,62 @@ val SponsorBlock = patch(
         )
     )
 
+    // -----------------------------
+    // Player controls
+    // -----------------------------
     addTopControl(R.layout.revanced_sb_button)
 
-    // Hook the video time methods.
-    videoTimeHooks.add { SegmentPlaybackController.setVideoTime(it) }
-    videoIdHooks.add { SegmentPlaybackController.setCurrentVideoId(it) }
+    videoTimeHooks.add {
+        runCatching { SegmentPlaybackController.setVideoTime(it) }
+    }
 
+    videoIdHooks.add {
+        runCatching { SegmentPlaybackController.setCurrentVideoId(it) }
+    }
+
+    // -----------------------------
     // Seekbar drawing
+    // -----------------------------
     var rectSetOnce = false
+    val sponsorBarRectField = ::SponsorBarRect.field
+
     ::seekbarOnDrawFingerprint.hookMethod {
-        val sponsorBarRectField = ::SponsorBarRect.field
         before { param ->
-            // Get left and right of seekbar rectangle.
             rectSetOnce = false
-            SegmentPlaybackController.setSponsorBarRect(sponsorBarRectField.get(param.thisObject) as Rect)
+            val rect = sponsorBarRectField.get(param.thisObject) as? Rect ?: return@before
+            runCatching { SegmentPlaybackController.setSponsorBarRect(rect) }
         }
     }
-    val drawCircle =
+
+    val drawCircleMethod =
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R)
             "Landroid/view/DisplayListCanvas;->drawCircle(FFFLandroid/graphics/Paint;)V"
         else
             "Landroid/graphics/RecordingCanvas;->drawCircle(FFFLandroid/graphics/Paint;)V"
+
     ::seekbarOnDrawFingerprint.hookMethod(
         scopedHook(
-            // Set the thickness of the segment.
             DexMethod("Landroid/graphics/Rect;->set(IIII)V").toMethod() to {
                 after { param ->
-                    // Only the first call to Rect.set from onDraw sets the segment thickness.
                     if (rectSetOnce) return@after
-                    SegmentPlaybackController.setSponsorBarThickness((param.thisObject as Rect).height())
+                    val rect = param.thisObject as? Rect ?: return@after
+                    runCatching { SegmentPlaybackController.setSponsorBarThickness(rect.height()) }
                     rectSetOnce = true
                 }
             },
-            // Find the drawCircle call and draw the segment before it.
-            DexMethod(drawCircle).toMethod() to {
+            DexMethod(drawCircleMethod).toMethod() to {
                 before { param ->
-                    SegmentPlaybackController.drawSponsorTimeBars(
-                        param.thisObject as Canvas, param.args[1] as Float
-                    )
+                    val canvas = param.thisObject as? Canvas ?: return@before
+                    val y = param.args.getOrNull(1) as? Float ?: return@before
+                    runCatching { SegmentPlaybackController.drawSponsorTimeBars(canvas, y) }
                 }
-            },
+            }
         )
     )
 
-    // Change visibility of the buttons.
+    // -----------------------------
+    // Control visibility
+    // -----------------------------
     initializeTopControl(
         ControlInitializer(
             R.id.revanced_sb_create_segment_button,
@@ -122,6 +137,7 @@ val SponsorBlock = patch(
             CreateSegmentButton::setVisibilityNegatedImmediate
         )
     )
+
     initializeTopControl(
         ControlInitializer(
             R.id.revanced_sb_voting_button,
@@ -132,46 +148,71 @@ val SponsorBlock = patch(
         )
     )
 
-    // Append the new time to the player layout.
+    // -----------------------------
+    // Append time without segments
+    // -----------------------------
     ::appendTimeFingerprint.hookMethod {
-        before {
-            it.args[2] = SegmentPlaybackController.appendTimeWithoutSegments(it.args[2].toString())
+        before { param ->
+            val time = param.args[2]?.toString() ?: return@before
+            param.args[2] = runCatching {
+                SegmentPlaybackController.appendTimeWithoutSegments(time)
+            }.getOrDefault(time)
         }
     }
 
-    // Initialize the player controller.
-    onCreateHook.add { SegmentPlaybackController.initialize(it) }
+    // -----------------------------
+    // Initialize controller
+    // -----------------------------
+    onCreateHook.add {
+        runCatching { SegmentPlaybackController.initialize(it) }
+    }
 
-    // Initialize the SponsorBlock view.
-    val controls_overlay_layout =
+    // -----------------------------
+    // Overlay initialization
+    // -----------------------------
+    val controlsOverlayLayout =
         Utils.getResourceIdentifier("size_adjustable_youtube_controls_overlay", "layout")
-    ::controlsOverlayFingerprint.hookMethod(scopedHook(DexMethod("Landroid/view/LayoutInflater;->inflate(ILandroid/view/ViewGroup;)Landroid/view/View;").toMember()) {
-        val insetOverlayViewLayout = inset_overlay_view_layout
-        after { param ->
-            if (param.args[0] != controls_overlay_layout) return@after
-            val layout = param.result as ViewGroup
-            val overlay_view = layout.findViewById<ViewGroup>(insetOverlayViewLayout)
-            SponsorBlockViewController.initialize(overlay_view)
-        }
-    })
 
-    ::adProgressTextViewVisibilityFingerprint.hookMethod(scopedHook(::AdProgressTextVisibility.method) {
-        before {
-            SegmentPlaybackController.setAdProgressTextVisibility(it.args[0] as Int)
-        }
-    })
-
-    fun injectClassLoader(self: ClassLoader, host: ClassLoader) {
-        host.setObjectField("parent", object : ClassLoader(host.parent) {
-            override fun findClass(name: String): Class<*> {
-                try {
-                    if (name.startsWith("app.revanced")) return self.loadClass(name)
-                } catch (_: ClassNotFoundException) {
-                }
-
-                throw ClassNotFoundException(name)
+    ::controlsOverlayFingerprint.hookMethod(
+        scopedHook(
+            DexMethod("Landroid/view/LayoutInflater;->inflate(ILandroid/view/ViewGroup;)Landroid/view/View;").toMember()
+        ) {
+            val insetOverlayViewLayout = inset_overlay_view_layout
+            after { param ->
+                if (param.args[0] != controlsOverlayLayout) return@after
+                val layout = param.result as? ViewGroup ?: return@after
+                val overlay = layout.findViewById<ViewGroup>(insetOverlayViewLayout) ?: return@after
+                runCatching { SponsorBlockViewController.initialize(overlay) }
             }
-        })
+        }
+    )
+
+    // -----------------------------
+    // Ad progress visibility
+    // -----------------------------
+    ::adProgressTextViewVisibilityFingerprint.hookMethod(
+        scopedHook(::AdProgressTextVisibility.method) {
+            before { param ->
+                val visibility = param.args.getOrNull(0) as? Int ?: return@before
+                runCatching { SegmentPlaybackController.setAdProgressTextVisibility(visibility) }
+            }
+        }
+    )
+
+    // -----------------------------
+    // ClassLoader injection
+    // -----------------------------
+    fun injectClassLoader(self: ClassLoader, host: ClassLoader) {
+        runCatching {
+            host.setObjectField("parent", object : ClassLoader(host.parent) {
+                override fun findClass(name: String): Class<*> {
+                    if (name.startsWith("app.revanced")) {
+                        return self.loadClass(name)
+                    }
+                    throw ClassNotFoundException(name)
+                }
+            })
+        }
     }
 
     injectClassLoader(this::class.java.classLoader!!, classLoader)
