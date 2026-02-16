@@ -5,7 +5,7 @@ import io.github.chsbuffer.revancedxposed.patch
 
 val VideoAds = patch(
     name = "Video ads",
-    description = "Adds an option to remove ads in the video player.",
+    description = "Adds an option to remove ads in the video player when you watch videos.",
 ) {
     ::loadVideoAdsFingerprint.hookMethod(XC_MethodReplacement.DO_NOTHING)
 }
